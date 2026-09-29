@@ -72,7 +72,7 @@ def benchmark_suite(
                 except (NotImplementedError, StrategyNotApplicable) as exc:
                     write_json(run_root / task.name / f"{method}.skip.json", {"reason": str(exc)})
                     continue
-                _save_fitted(run_root / task.name / method, task, fitted)
+                _save_fitted(run_root / task.name / method, task, fitted, backend)
                 store.add_specialization(
                     f"{run_id}:{task.name}:{fitted.artifact.strategy}",
                     run_id,
@@ -110,7 +110,7 @@ def evaluate_fitted(
     batch_size: int,
     option_permutations: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    evaluation_rows = rows["hidden"] + rows["paraphrase"] + rows["hard"]
+    evaluation_rows = rows["validation"] + rows["hidden"] + rows["paraphrase"] + rows["hard"]
     before_mem = _peak_memory_mb()
     started = time.perf_counter()
     predictions = []
@@ -126,7 +126,7 @@ def evaluate_fitted(
     overall = classification_metrics(expected, probabilities, task.decision.labels)
     per_split = {}
     cursor = 0
-    for split in ("hidden", "paraphrase", "hard"):
+    for split in ("validation", "hidden", "paraphrase", "hard"):
         count = len(rows[split])
         if count:
             per_split[split] = classification_metrics(
@@ -144,7 +144,9 @@ def evaluate_fitted(
             rng.shuffle(permuted.decision.labels)
             option_runs.append([x["label"] for x in backend.predict_batch(hidden_states, permuted)])
     else:
-        option_runs = [[x["label"] for x in predictions[: len(rows["hidden"])]]] * max(
+        hidden_start = len(rows["validation"])
+        hidden_end = hidden_start + len(rows["hidden"])
+        option_runs = [[x["label"] for x in predictions[hidden_start:hidden_end]]] * max(
             option_permutations, 2
         )
     noise_rows = rows["hidden"]
@@ -183,6 +185,9 @@ def evaluate_fitted(
         "throughput_samples_per_second": len(evaluation_rows) / elapsed if elapsed else None,
         "cold_load_seconds": getattr(backend, "cold_load_seconds", None),
         "peak_memory_mb": max(_peak_memory_mb() - before_mem, 0.0),
+        "model_calls": len(evaluation_rows)
+        if fitted.artifact.decision_component in {"laya_head", "pairwise_laya_head"}
+        else len(batch_latencies),
     }
     result = {
         "strategy": fitted.artifact.strategy,
@@ -230,11 +235,19 @@ def aggregate_run(
     }
 
 
-def _save_fitted(path: Path, task: TaskSpec, fitted: FittedStrategy) -> None:
+def _save_fitted(path: Path, task: TaskSpec, fitted: FittedStrategy, backend: LayaBackend) -> None:
     path.mkdir(parents=True, exist_ok=True)
     write_json(
         path / "specialization.json",
-        {"task": task.model_dump(mode="json"), "artifact": fitted.artifact.model_dump(mode="json")},
+        {
+            "task": task.model_dump(mode="json"),
+            "artifact": fitted.artifact.model_dump(mode="json"),
+            "checkpoint": {
+                "backend": backend.info.name,
+                "model_id": backend.info.model_id,
+                "revision": backend.info.revision,
+            },
+        },
     )
     save_tensors_deterministic(
         path / "vectors.safetensors",

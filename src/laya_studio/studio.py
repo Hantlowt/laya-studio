@@ -24,6 +24,7 @@ from .generation import (
     remove_generated_leakage,
 )
 from .io import load_suite, save_suite
+from .models import model_catalog
 from .providers import OpenAICompatibleProvider
 from .schemas import Example, SuiteManifest, TaskSpec
 from .store import ExperimentStore
@@ -67,9 +68,10 @@ class RunRequest(ApiModel):
     task: TaskSpec
     examples: list[dict[str, Any]]
     methods: list[str] = Field(min_length=1)
-    backend: str = "pytorch"
-    model: str = "convaiinnovations/laya"
-    device: str | None = "mps"
+    backend: str = "mlx"
+    model: str = "aac6fef/laya-mlx"
+    revision: str | None = None
+    device: str | None = None
     seed: int = 0
 
 
@@ -194,7 +196,7 @@ class StudioService:
         self.store = ExperimentStore(database)
         self.jobs = JobManager()
         self.env_path = env_path or root.parent.parent / ".env"
-        self._backends: dict[tuple[str, str, str | None], LayaBackend] = {}
+        self._backends: dict[tuple[str, str, str | None, str | None], LayaBackend] = {}
         self._backend_lock = threading.RLock()
 
     def _saved_env(self) -> dict[str, str]:
@@ -227,6 +229,9 @@ class StudioService:
                 os.getenv("LAYA_LAB_LLM_API_KEY", saved.get("LAYA_LAB_LLM_API_KEY", ""))
             ),
         }
+
+    def model_catalog(self) -> list[dict[str, Any]]:
+        return model_catalog()
 
     def save_connection(self, config: ProviderConfig) -> dict[str, Any]:
         saved = self._saved_env()
@@ -357,7 +362,9 @@ class StudioService:
                 "Loading Laya",
                 f"Loading {request.model} on {request.device or 'auto'}.",
             )
-            backend = self._backend(request.backend, request.model, request.device)
+            backend = self._backend(
+                request.backend, request.model, request.device, request.revision
+            )
             update(
                 32,
                 "Specializations",
@@ -374,12 +381,12 @@ class StudioService:
             )
             display_name = (request.name or request.task.name.replace("_", " ")).strip()
             self.store.set_run_name(run_id, display_name)
-            update(82, "Selecting the best result", "Ranking by hidden test, then latency.")
+            update(82, "Selecting the best result", "Ranking by validation, then latency.")
             data = self.store.run(run_id)
             ranked = sorted(
                 data["results"],
                 key=lambda row: (
-                    -row["metrics"]["splits"].get("hidden", {}).get("accuracy", -1),
+                    -row["metrics"]["splits"].get("validation", {}).get("accuracy", -1),
                     row["timings"].get("latency_per_sample_ms") or float("inf"),
                 ),
             )
@@ -416,6 +423,9 @@ class StudioService:
                         "strategy": row["strategy"],
                         "decision_component": row["decision_component"],
                         "accuracy": score,
+                        "validation_accuracy": row["metrics"]["splits"]
+                        .get("validation", {})
+                        .get("accuracy"),
                         "delta": score - baseline_score
                         if score is not None and baseline_score is not None
                         else None,
@@ -456,7 +466,12 @@ class StudioService:
         specialization_id = f"{run_id}:{request.task}:{request.strategy}"
         stored = self.store.specialization(specialization_id)
         device = "mps" if data["run"]["backend"] == "pytorch" else None
-        backend = self._backend(data["run"]["backend"], data["run"]["base_model"], device)
+        backend = self._backend(
+            data["run"]["backend"],
+            data["run"]["base_model"],
+            device,
+            data["run"]["base_revision"],
+        )
         _task, fitted = load_saved_fitted(Path(stored["artifact_path"]), backend)
         return fitted.predict([request.text])[0]
 
@@ -464,7 +479,12 @@ class StudioService:
         data = self.store.run(run_id)
         stored = self.store.specialization(f"{run_id}:{request.task}:{request.strategy}")
         device = "mps" if data["run"]["backend"] == "pytorch" else None
-        backend = self._backend(data["run"]["backend"], data["run"]["base_model"], device)
+        backend = self._backend(
+            data["run"]["backend"],
+            data["run"]["base_model"],
+            device,
+            data["run"]["base_revision"],
+        )
         task, fitted = load_saved_fitted(Path(stored["artifact_path"]), backend)
         label = request.name or data["run"].get("display_name") or task.name
         slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", label).strip("-").lower() or task.name
@@ -493,9 +513,11 @@ class StudioService:
             },
         }
 
-    def _backend(self, name: str, model: str, device: str | None) -> LayaBackend:
-        key = (name, model, device)
+    def _backend(
+        self, name: str, model: str, device: str | None, revision: str | None = None
+    ) -> LayaBackend:
+        key = (name, model, device, revision)
         with self._backend_lock:
             if key not in self._backends:
-                self._backends[key] = create_backend(name, model, device)
+                self._backends[key] = create_backend(name, model, device, revision)
             return self._backends[key]

@@ -19,6 +19,7 @@ from .generation import (
     invent_task_catalog,
 )
 from .io import load_suite, read_yaml
+from .models import ensure_checkpoint, model_catalog, resolve_revision
 from .providers import OpenAICompatibleProvider
 from .schemas import TaskSpec
 from .store import ExperimentStore
@@ -27,6 +28,19 @@ from .strategies import create_strategy
 app = typer.Typer(
     no_args_is_help=True, help="Leakage-resistant specialization experiments for frozen Laya."
 )
+
+
+@app.command("models")
+def models_command(download: bool = typer.Option(False, help="Download every listed checkpoint")):
+    """List built-in vanilla checkpoints and their immutable Hub revisions."""
+    rows = []
+    for item in model_catalog():
+        revision = resolve_revision(item["model_id"])
+        row = {**item, "revision": revision}
+        if download:
+            row["local_path"] = ensure_checkpoint(item["model_id"], revision)
+        rows.append(row)
+    typer.echo(json.dumps(rows, indent=2, sort_keys=True))
 
 
 def _store(path: Path) -> ExperimentStore:
@@ -93,6 +107,7 @@ def benchmark(
     methods: str = "baseline,prompt_only,nearest_prototype,contrastive_vector,multiclass_centroids,whitened_prototypes,residual_embedding_transform,activation_steering,multi_vector_steering,pairwise_ranking",
     backend: str = os.getenv("LAYA_LAB_BACKEND", "pytorch"),
     model: str = os.getenv("LAYA_LAB_MODEL", "convaiinnovations/laya"),
+    revision: Optional[str] = typer.Option(None, help="Hub commit/tag; pinned if omitted"),
     device: Optional[str] = os.getenv("LAYA_LAB_DEVICE") or None,
     database: Path = Path("experiments/laya_lab.sqlite3"),
     artifacts: Path = Path("experiments/runs"),
@@ -101,7 +116,7 @@ def benchmark(
     batch_size: int = 64,
 ):
     """Run all methods against the same immutable hidden examples."""
-    runtime = create_backend(backend, model, device)
+    runtime = create_backend(backend, model, device, revision)
     run_seeds = [int(x.strip()) for x in seeds.split(",")] if seeds else [seed]
     for run_seed in run_seeds:
         run_id = benchmark_suite(
@@ -176,6 +191,7 @@ def specialize(
     output: Path = Path("exports/specialized-laya"),
     backend: str = os.getenv("LAYA_LAB_BACKEND", "pytorch"),
     model: str = os.getenv("LAYA_LAB_MODEL", "convaiinnovations/laya"),
+    revision: Optional[str] = typer.Option(None, help="Hub commit/tag; pinned if omitted"),
     device: Optional[str] = os.getenv("LAYA_LAB_DEVICE") or None,
     specialization_model: Optional[str] = None,
     benchmark_model: Optional[str] = None,
@@ -198,7 +214,7 @@ def specialize(
     validation, _ = generate_benchmark_splits(
         benchmark_provider, task_spec, {"validation": max(20, examples // 2)}, seed + 50_000
     )
-    runtime = create_backend(backend, model, device)
+    runtime = create_backend(backend, model, device, revision)
     fitted = create_strategy(method).fit(task_spec, spec_rows, validation, runtime)
     probes = [x.input for x in validation[:10]] or [x.input for x in spec_rows[:10]]
     export_specialization(
@@ -218,7 +234,9 @@ def export_command(
     """Export a stored run specialization and enforce fresh-process fidelity."""
     store = _store(database)
     record = store.specialization(specialization_id)
-    runtime = create_backend(record["backend"], record["base_model"], device)
+    runtime = create_backend(
+        record["backend"], record["base_model"], device, record["base_revision"]
+    )
     task, fitted = load_saved_fitted(Path(record["artifact_path"]), runtime)
     _manifest, _tasks, splits = load_suite(Path(record["suite_path"]))
     probes = [x.input for x in splits["hidden"] if x.task_name == task.name][:10]

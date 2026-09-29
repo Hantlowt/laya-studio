@@ -103,6 +103,7 @@ class SpecializedLaya:
         if missing:
             raise ValueError(f"artifact is missing tensors: {sorted(missing)}")
         self.backend = backend
+        _assert_checkpoint_compatible(self.manifest, backend)
 
     @classmethod
     def from_pretrained(
@@ -135,7 +136,9 @@ class SpecializedLaya:
 
                 runtime = FakeBackend(dimension=dimension, model_id=model)
             else:
-                runtime = create_backend(str(backend_name), model, device)
+                runtime = create_backend(
+                    str(backend_name), model, device, revision=manifest.base_revision
+                )
         return cls(root, runtime)
 
     def predict(self, state: str | dict | list, questions: dict | None = None) -> dict[str, Any]:
@@ -240,12 +243,44 @@ def predict_saved(
 
 def load_saved_fitted(path: Path, backend: LayaBackend) -> tuple[TaskSpec, FittedStrategy]:
     raw = json.loads((path / "specialization.json").read_text())
+    checkpoint = raw.get("checkpoint")
+    if checkpoint:
+        expected = (
+            checkpoint.get("backend"),
+            checkpoint.get("model_id"),
+            checkpoint.get("revision"),
+        )
+        actual = (backend.info.name, backend.info.model_id, backend.info.revision)
+        if expected != actual:
+            raise ValueError(
+                "specialization checkpoint mismatch: "
+                f"expected {expected[0]}:{expected[1]}@{expected[2]}, "
+                f"got {actual[0]}:{actual[1]}@{actual[2]}"
+            )
     task = TaskSpec.model_validate(raw["task"])
     artifact = StrategyArtifact.model_validate(raw["artifact"])
     arrays = load_file(str(path / "vectors.safetensors"))
     fitted = FittedStrategy(artifact=artifact, arrays=arrays)
     fitted._predict = lambda states: predict_saved(artifact, arrays, task, backend, states)
     return task, fitted
+
+
+def _assert_checkpoint_compatible(manifest: ExportManifest, backend: LayaBackend) -> None:
+    if backend.info.name not in manifest.backend_compatibility:
+        raise ValueError(
+            f"artifact backend mismatch: expected {manifest.backend_compatibility}, "
+            f"got {backend.info.name}"
+        )
+    model_matches = backend.info.model_id == manifest.base_model
+    if manifest.self_contained and manifest.base_model_path:
+        model_matches = Path(backend.info.model_id).name == Path(manifest.base_model_path).name
+    revision_matches = backend.info.revision == manifest.base_revision
+    if not model_matches or not revision_matches:
+        raise ValueError(
+            "artifact checkpoint mismatch: "
+            f"expected {manifest.base_model}@{manifest.base_revision}, "
+            f"got {backend.info.model_id}@{backend.info.revision}"
+        )
 
 
 def load(path: str | Path, **kwargs: Any) -> SpecializedLaya:

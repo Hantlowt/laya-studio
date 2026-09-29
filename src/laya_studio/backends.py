@@ -9,6 +9,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from .models import resolve_revision
 from .schemas import DecisionType, TaskSpec
 
 
@@ -104,12 +105,17 @@ def parse_laya_result(result: dict, task: TaskSpec) -> dict[str, Any]:
 
 class PyTorchLayaBackend(LayaBackend):
     def __init__(
-        self, model_id: str = "convaiinnovations/laya", device: str | None = None, **kwargs: Any
+        self,
+        model_id: str = "convaiinnovations/laya",
+        device: str | None = None,
+        revision: str | None = None,
+        **kwargs: Any,
     ):
         import laya
 
+        resolved_revision = resolve_revision(model_id, revision)
         started = time.perf_counter()
-        self.agent = laya.load(model_id, device=device, **kwargs)
+        self.agent = laya.load(model_id, device=device, revision=resolved_revision, **kwargs)
         self.cold_load_seconds = time.perf_counter() - started
         self._embed = laya.embed_fn_from_agent(self.agent)
         self._lock = threading.RLock()
@@ -118,6 +124,7 @@ class PyTorchLayaBackend(LayaBackend):
         self.info = BackendInfo(
             "pytorch",
             model_id,
+            revision=resolved_revision,
             device=str(self.agent.device),
             supports_activation_steering=bool(self._layers),
         )
@@ -183,18 +190,27 @@ class PyTorchLayaBackend(LayaBackend):
 
 class MLXLayaBackend(LayaBackend):
     def __init__(
-        self, model_id: str = "aac6fef/laya-mlx", device: str | None = None, **kwargs: Any
+        self,
+        model_id: str = "aac6fef/laya-mlx",
+        device: str | None = None,
+        revision: str | None = None,
+        **kwargs: Any,
     ):
         import laya_mlx
 
+        resolved_revision = resolve_revision(model_id, revision)
         started = time.perf_counter()
-        self.agent = laya_mlx.load(model_id, device=device, **kwargs)
+        self.agent = laya_mlx.load(model_id, device=device, revision=resolved_revision, **kwargs)
         self.cold_load_seconds = time.perf_counter() - started
         self._embed = laya_mlx.embed_fn_from_agent(self.agent)
         self._embedding_cache: dict[str, np.ndarray] = {}
         self._lock = threading.RLock()
         self.info = BackendInfo(
-            "mlx", model_id, device=str(device), supports_activation_steering=False
+            "mlx",
+            model_id,
+            revision=resolved_revision,
+            device=str(device),
+            supports_activation_steering=False,
         )
 
     def embed(self, texts: Sequence[str]) -> np.ndarray:
@@ -260,12 +276,17 @@ def _softmax(values: np.ndarray) -> np.ndarray:
 
 
 def create_backend(
-    name: str, model_id: str | None = None, device: str | None = None
+    name: str,
+    model_id: str | None = None,
+    device: str | None = None,
+    revision: str | None = None,
 ) -> LayaBackend:
     if name == "pytorch":
-        return PyTorchLayaBackend(model_id or "convaiinnovations/laya", device=device)
+        return PyTorchLayaBackend(
+            model_id or "convaiinnovations/laya", device=device, revision=revision
+        )
     if name == "mlx":
-        return MLXLayaBackend(model_id or "aac6fef/laya-mlx", device=device)
+        return MLXLayaBackend(model_id or "aac6fef/laya-mlx", device=device, revision=revision)
     if name == "fake":
         return FakeBackend(model_id=model_id or "fake-hash-v1")
     raise ValueError(f"unknown backend {name!r}")

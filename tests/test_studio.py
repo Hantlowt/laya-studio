@@ -25,6 +25,16 @@ def test_studio_shell_and_assets(tmp_path):
     assert "Model library" in client.get("/static/app.js").text
     assert "--teal" in client.get("/static/app.css").text
     assert client.get("/api/runs").json() == []
+    models = client.get("/api/studio/models").json()
+    assert {row["model_id"] for row in models} >= {
+        "aac6fef/laya-mlx",
+        "aac6fef/laya-multilingual-mlx",
+        "aac6fef/laya-typed-decisions-mlx",
+        "convaiinnovations/laya",
+        "convaiinnovations/laya-multilingual",
+        "convaiinnovations/laya-typed-decisions",
+    }
+    assert "Custom Hugging Face ID" in client.get("/static/app.js").text
 
 
 def test_env_connection_is_private_and_reloadable(tmp_path):

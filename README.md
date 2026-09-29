@@ -126,6 +126,25 @@ export LAYA_LAB_BACKEND=mlx
 export LAYA_LAB_MODEL=aac6fef/laya-mlx
 ```
 
+### Choosing the vanilla checkpoint
+
+The Studio exposes backend and checkpoint selection before a run. Selecting several entries runs
+every vanilla and every specialization against the exact same reviewed suite, while keeping two
+different deltas visible: checkpoint-to-checkpoint and specialization versus that same checkpoint.
+Compatible Hub checkpoints download automatically on first use; the resolved immutable Hub commit
+is stored in the run and export manifest.
+
+| Family | MLX | PyTorch upstream | Intended use |
+|---|---|---|---|
+| English | `aac6fef/laya-mlx` | `convaiinnovations/laya` | ModernBERT-large, English, 512 tokens |
+| Multilingual | `aac6fef/laya-multilingual-mlx` | `convaiinnovations/laya-multilingual` | mmBERT-base, multilingual, 1024 tokens |
+| Typed Decisions | `aac6fef/laya-typed-decisions-mlx` | `convaiinnovations/laya-typed-decisions` | upstream workflow specialization, 1024 tokens |
+
+The Custom Hugging Face ID option accepts another compatible Laya repository or local path. A
+specialization is checkpoint-locked: loading it with a different backend, model ID, or revision
+raises an explicit error instead of silently mixing representations. Inspect or pre-download the
+catalog with `laya-studio models` or `laya-studio models --download`.
+
 The current MLX public API does not expose a safe intermediate-state hook, so
 `activation_steering` is recorded as unsupported there. Embedding strategies still reuse the
 loaded MLX encoder. PyTorch freezes every parameter and provides a temporary encoder-layer hook

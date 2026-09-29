@@ -53,6 +53,10 @@ def create_app(database: Path):
     def get_settings():
         return studio.public_settings()
 
+    @app.get("/api/studio/models")
+    def get_models():
+        return studio.model_catalog()
+
     @app.post("/api/studio/settings")
     def save_settings(request: SettingsRequest):
         return studio.save_connection(request.provider)

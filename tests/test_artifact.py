@@ -1,6 +1,7 @@
 import pytest
 
 from laya_studio.artifact import SpecializedLaya, export_specialization, verify_fidelity
+from laya_studio.backends import FakeBackend
 from laya_studio.strategies import PrototypeStrategy
 
 
@@ -47,3 +48,20 @@ def test_artifact_version_rejected(tmp_path, binary_task, rows, fake_backend):
     (root / "manifest.json").write_text(manifest)
     with pytest.raises(Exception, match="format_version"):
         SpecializedLaya.from_pretrained(root, backend="fake")
+
+
+def test_artifact_rejects_a_different_checkpoint(tmp_path, binary_task, rows, fake_backend):
+    spec = [x for x in rows if x.split == "specialization"]
+    fitted = PrototypeStrategy().fit(binary_task, spec, [], fake_backend)
+    root = tmp_path / "locked"
+    export_specialization(
+        root,
+        name="locked",
+        task=binary_task,
+        fitted=fitted,
+        backend=fake_backend,
+        probes=["probe"],
+        verify=False,
+    )
+    with pytest.raises(ValueError, match="checkpoint mismatch"):
+        SpecializedLaya.from_pretrained(root, backend=FakeBackend(model_id="other-model"))

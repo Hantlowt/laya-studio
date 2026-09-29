@@ -8,6 +8,8 @@ const state = {
   activeSplit: 'specialization',
   result: null,
   runName: null,
+  modelCatalog: [],
+  modelResults: [],
 };
 
 const splitMeta = {
@@ -162,6 +164,7 @@ async function renderHome() {
 async function renderCreate() {
   let settings = {base_url: localStorage.getItem('laya.endpoint') || 'https://openrouter.ai/api/v1', model: localStorage.getItem('laya.model') || '', has_api_key: false};
   try { settings = {...settings, ...await api('/api/studio/settings')}; } catch (_) {}
+  try { state.modelCatalog = await api('/api/studio/models'); } catch (_) {}
   const savedEndpoint = settings.base_url;
   const savedModel = settings.model;
   app.innerHTML = `<div class="page">
@@ -335,12 +338,16 @@ function renderDatasetReview() {
     <section class="card">
       <div class="section-head"><div><h2>Methods to compare</h2><p>The best hidden-test result will be exported automatically.</p></div><span class="badge">Frozen Laya weights</span></div>
       <div class="field" style="margin-bottom:18px"><label for="run-name">Variant name</label><input id="run-name" value="${esc(state.runName)}" maxlength="120" placeholder="e.g. Customer sentiment — balanced"><span class="hint">This is the friendly name shown in your model library.</span></div>
+      <div class="section-head"><div><h3>Vanilla checkpoint</h3><p>Select one model, or several to compare every vanilla and specialization on this exact benchmark.</p></div><span class="badge">Auto-download</span></div>
+      <div class="method-grid" id="model-grid">${(state.modelCatalog || []).map((model, i) => `<label class="method-option"><input type="checkbox" data-base-model="${esc(model.model_id)}" data-backend="${esc(model.backend)}" ${i === 0 ? 'checked' : ''}><span><strong>${esc(model.title)}</strong><small>${esc(model.summary)}</small></span></label>`).join('')}</div>
+      <label class="method-option" style="margin:14px 0 20px"><input type="checkbox" id="custom-model-toggle"><span><strong>Custom Hugging Face ID</strong><small>Use any compatible Laya checkpoint, pinned to its resolved Hub commit.</small></span></label>
+      <div class="form-grid" id="custom-model-fields" style="display:none;margin-bottom:20px"><div class="field"><label for="custom-backend">Backend</label><select id="custom-backend"><option value="mlx">MLX</option><option value="pytorch">PyTorch</option></select></div><div class="field"><label for="custom-model">Hugging Face ID or local path</label><input id="custom-model" placeholder="owner/checkpoint"></div></div>
       <div class="method-grid">${methods.map(([id, title, help]) => {
         const disabled = (id === 'contrastive_vector' || id === 'activation_steering') && !binary;
         const checked = !disabled && ['baseline','prompt_only','nearest_prototype','multiclass_centroids','multi_vector_steering','activation_steering'].includes(id);
         return `<label class="method-option" style="${disabled ? 'opacity:.45' : ''}"><input type="checkbox" data-method="${id}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span><strong>${title}</strong><small>${disabled ? 'Not applicable to this multiclass task' : help}</small></span></label>`;
       }).join('')}</div>
-      <div class="form-actions"><button class="btn btn-ghost" id="back-policy">← Policy</button><button class="btn btn-primary btn-lg" id="run-experiment">Test specializations <span>→</span></button></div>
+      <div class="form-actions"><button class="btn btn-ghost" id="back-policy">← Policy</button><button class="btn btn-primary btn-lg" id="run-experiment">Test selected models <span>→</span></button></div>
     </section>
   </div>`;
   bindDatasetEvents();
@@ -378,25 +385,36 @@ function bindDatasetEvents() {
   };
   document.getElementById('back-policy').onclick = () => { syncDatasetRows(); renderPolicy(); };
   document.getElementById('run-experiment').onclick = startRun;
+  document.getElementById('custom-model-toggle').onchange = event => {
+    document.getElementById('custom-model-fields').style.display = event.target.checked ? 'grid' : 'none';
+  };
 }
 
 async function startRun() {
   syncDatasetRows();
   const selected = [...document.querySelectorAll('[data-method]:checked')].map(x => x.dataset.method);
   if (!selected.includes('baseline')) selected.unshift('baseline');
-  const payload = {
+  const basePayload = {
     name: (document.getElementById('run-name')?.value || state.runName || state.task.name).trim(),
     task: state.task,
     examples: Object.values(state.splits).flat(),
     methods: selected,
-    backend: 'pytorch',
-    model: 'convaiinnovations/laya',
-    device: 'mps',
     seed: state.config?.seed || 0,
   };
+  const selections = [...document.querySelectorAll('[data-base-model]:checked')].map(node => ({backend: node.dataset.backend, model: node.dataset.baseModel}));
+  if (document.getElementById('custom-model-toggle')?.checked && document.getElementById('custom-model').value.trim()) {
+    selections.push({backend: document.getElementById('custom-backend').value, model: document.getElementById('custom-model').value.trim()});
+  }
+  if (!selections.length) { toast('Select at least one vanilla checkpoint.', true); return; }
   try {
-    const job = await api(`/api/studio/drafts/${state.draftId}/run`, {method:'POST',body:JSON.stringify(payload)});
-    await watchJob(job.id, 3, result => { state.result = result; renderResults(); });
+    state.modelResults = [];
+    for (const selection of selections) {
+      const payload = {...basePayload, ...selection, device: selection.backend === 'pytorch' ? 'mps' : null};
+      const job = await api(`/api/studio/drafts/${state.draftId}/run`, {method:'POST',body:JSON.stringify(payload)});
+      await watchJob(job.id, 3, result => { state.modelResults.push({...result, checkpoint: selection}); });
+    }
+    state.result = state.modelResults[0];
+    renderResults();
   } catch (error) { toast(error.message, true); renderDatasetReview(); }
 }
 
@@ -405,7 +423,8 @@ function renderResults() {
   const best = result.best;
   const exportName = result.export_path.split('/').pop();
   app.innerHTML = `<div class="page">${stepper(3)}
-    <div class="page-head compact"><div><div class="eyebrow">Experiment complete</div><h1>Your specialization is ready.</h1><p class="lede">The ranking uses only the hidden test reviewed in the previous step.</p></div></div>
+    <div class="page-head compact"><div><div class="eyebrow">Experiment complete</div><h1>Your specialization is ready.</h1><p class="lede">Method selection used validation only. Hidden, paraphrase and hard scores are final measurements.</p></div></div>
+    ${state.modelResults.length > 1 ? `<section class="card"><div class="section-head"><div><h2>Checkpoint comparison</h2><p>Checkpoint gains and same-checkpoint specialization gains are kept separate.</p></div></div><div class="ranking">${state.modelResults.map(item => { const baseline = item.ranking.find(row => row.strategy === 'baseline'); return `<div class="rank-row"><span class="rank-num">L</span><div class="rank-name"><strong>${esc(item.checkpoint.model)}</strong><small>${esc(item.checkpoint.backend)} · vanilla ${fmt(baseline?.accuracy)}</small></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2,(item.best.accuracy || 0)*100)}%"></div></div><strong>${fmt(item.best.accuracy)}</strong><span class="latency">${item.best.delta >= 0 ? '+' : ''}${((item.best.delta || 0)*100).toFixed(1)} pts</span></div>`; }).join('')}</div></section>` : ''}
     <section class="card winner">
       <div class="eyebrow">Best result</div><h2>${humanMethod(best.strategy)}</h2><p>${componentLabel(best.decision_component)}</p>
       <div class="winner-metrics"><div><strong>${fmt(best.accuracy)}</strong><small>Hidden accuracy</small></div><div><strong class="${best.delta >= 0 ? 'delta-up' : 'delta-down'}">${best.delta == null ? '—' : `${best.delta >= 0 ? '+' : ''}${(best.delta*100).toFixed(1)} pts`}</strong><small>vs original Laya</small></div><div><strong>${best.latency_ms?.toFixed(1) || '—'} ms</strong><small>Latency / example</small></div></div>
